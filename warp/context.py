@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import ctypes
-import errno
 import functools
 import hashlib
 import inspect
@@ -20,13 +19,26 @@ import operator
 import os
 import platform
 import sys
-import time
 import types
 import typing
 import weakref
 from copy import copy as shallowcopy
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 import numpy as np
 
@@ -34,6 +46,7 @@ import warp
 import warp.build
 import warp.codegen
 import warp.config
+from warp.types import Array, launch_bounds_t
 
 # represents either a built-in or user-defined function
 
@@ -62,10 +75,10 @@ def get_function_args(func):
 complex_type_hints = (Any, Callable, Tuple)
 sequence_types = (list, tuple)
 
-function_key_counts = {}
+function_key_counts: Dict[str, int] = {}
 
 
-def generate_unique_function_identifier(key):
+def generate_unique_function_identifier(key: str) -> str:
     # Generate unique identifiers for user-defined functions in native code.
     # - Prevents conflicts when a function is redefined and old versions are still in use.
     # - Prevents conflicts between multiple closures returned from the same function.
@@ -98,40 +111,40 @@ def generate_unique_function_identifier(key):
 class Function:
     def __init__(
         self,
-        func,
-        key,
-        namespace,
-        input_types=None,
-        value_type=None,
-        value_func=None,
-        export_func=None,
-        dispatch_func=None,
-        lto_dispatch_func=None,
-        module=None,
-        variadic=False,
-        initializer_list_func=None,
-        export=False,
-        doc="",
-        group="",
-        hidden=False,
-        skip_replay=False,
-        missing_grad=False,
-        generic=False,
-        native_func=None,
-        defaults=None,
-        custom_replay_func=None,
-        native_snippet=None,
-        adj_native_snippet=None,
-        replay_snippet=None,
-        skip_forward_codegen=False,
-        skip_reverse_codegen=False,
-        custom_reverse_num_input_args=-1,
-        custom_reverse_mode=False,
-        overloaded_annotations=None,
-        code_transformers=None,
-        skip_adding_overload=False,
-        require_original_output_arg=False,
-        scope_locals=None,  # the locals() where the function is defined, used for overload management
+        func: Optional[Callable],
+        key: str,
+        namespace: str,
+        input_types: Optional[Dict[str, Union[type, TypeVar]]] = None,
+        value_type: Optional[type] = None,
+        value_func: Optional[Callable[[Mapping[str, type], Mapping[str, Any]], type]] = None,
+        export_func: Optional[Callable[[Dict[str, type]], Dict[str, type]]] = None,
+        dispatch_func: Optional[Callable] = None,
+        lto_dispatch_func: Optional[Callable] = None,
+        module: Optional[Module] = None,
+        variadic: bool = False,
+        initializer_list_func: Optional[Callable[[Dict[str, Any], type], bool]] = None,
+        export: bool = False,
+        doc: str = "",
+        group: str = "",
+        hidden: bool = False,
+        skip_replay: bool = False,
+        missing_grad: bool = False,
+        generic: bool = False,
+        native_func: Optional[str] = None,
+        defaults: Optional[Dict[str, Any]] = None,
+        custom_replay_func: Optional[Function] = None,
+        native_snippet: Optional[str] = None,
+        adj_native_snippet: Optional[str] = None,
+        replay_snippet: Optional[str] = None,
+        skip_forward_codegen: bool = False,
+        skip_reverse_codegen: bool = False,
+        custom_reverse_num_input_args: int = -1,
+        custom_reverse_mode: bool = False,
+        overloaded_annotations: Optional[Dict[str, type]] = None,
+        code_transformers: Optional[List[ast.NodeTransformer]] = None,
+        skip_adding_overload: bool = False,
+        require_original_output_arg: bool = False,
+        scope_locals: Optional[Dict[str, Any]] = None,
     ):
         if code_transformers is None:
             code_transformers = []
@@ -156,7 +169,7 @@ class Function:
         self.native_snippet = native_snippet
         self.adj_native_snippet = adj_native_snippet
         self.replay_snippet = replay_snippet
-        self.custom_grad_func = None
+        self.custom_grad_func: Optional[Function] = None
         self.require_original_output_arg = require_original_output_arg
         self.generic_parent = None  # generic function that was used to instantiate this overload
 
@@ -172,6 +185,7 @@ class Function:
         )
         self.missing_grad = missing_grad  # whether builtin is missing a corresponding adjoint
         self.generic = generic
+        self.mangled_name: Optional[str] = None
 
         # allow registering functions with a different name in Python and native code
         if native_func is None:
@@ -188,8 +202,8 @@ class Function:
             # user-defined function
 
             # generic and concrete overload lookups by type signature
-            self.user_templates = {}
-            self.user_overloads = {}
+            self.user_templates: Dict[str, Function] = {}
+            self.user_overloads: Dict[str, Function] = {}
 
             # user defined (Python) function
             self.adj = warp.codegen.Adjoint(
@@ -220,19 +234,17 @@ class Function:
             # builtin function
 
             # embedded linked list of all overloads
-            # the builtin_functions dictionary holds
-            # the list head for a given key (func name)
-            self.overloads = []
+            # the builtin_functions dictionary holds the list head for a given key (func name)
+            self.overloads: List[Function] = []
 
             # builtin (native) function, canonicalize argument types
-            for k, v in input_types.items():
-                self.input_types[k] = warp.types.type_to_warp(v)
+            if input_types is not None:
+                for k, v in input_types.items():
+                    self.input_types[k] = warp.types.type_to_warp(v)
 
             # cache mangled name
             if self.export and self.is_simple():
                 self.mangled_name = self.mangle()
-            else:
-                self.mangled_name = None
 
         if not skip_adding_overload:
             self.add_overload(self)
@@ -263,7 +275,7 @@ class Function:
             signature_params.append(param)
         self.signature = inspect.Signature(signature_params)
 
-        # scope for resolving overloads
+        # scope for resolving overloads, the locals() where the function is defined
         if scope_locals is None:
             scope_locals = inspect.currentframe().f_back.f_locals
 
@@ -325,10 +337,10 @@ class Function:
         # this function has no overloads, call it like a plain Python function
         return self.func(*args, **kwargs)
 
-    def is_builtin(self):
+    def is_builtin(self) -> bool:
         return self.func is None
 
-    def is_simple(self):
+    def is_simple(self) -> bool:
         if self.variadic:
             return False
 
@@ -342,9 +354,8 @@ class Function:
 
         return True
 
-    def mangle(self):
-        # builds a mangled name for the C-exported
-        # function, e.g.: builtin_normalize_vec3()
+    def mangle(self) -> str:
+        """Build a mangled name for the C-exported function, e.g.: `builtin_normalize_vec3()`."""
 
         name = "builtin_" + self.key
 
@@ -360,7 +371,7 @@ class Function:
 
         return "_".join([name, *types])
 
-    def add_overload(self, f):
+    def add_overload(self, f: Function) -> None:
         if self.is_builtin():
             # todo: note that it is an error to add two functions
             # with the exact same signature as this would cause compile
@@ -375,7 +386,7 @@ class Function:
         else:
             # get function signature based on the input types
             sig = warp.types.get_signature(
-                f.input_types.values(), func_name=f.key, arg_names=list(f.input_types.keys())
+                list(f.input_types.values()), func_name=f.key, arg_names=list(f.input_types.keys())
             )
 
             # check if generic
@@ -384,7 +395,7 @@ class Function:
             else:
                 self.user_overloads[sig] = f
 
-    def get_overload(self, arg_types, kwarg_types):
+    def get_overload(self, arg_types: List[type], kwarg_types: Mapping[str, type]) -> Optional[Function]:
         assert not self.is_builtin()
 
         for f in self.user_overloads.values():
@@ -437,7 +448,7 @@ class Function:
         return f"<Function {self.key}({inputs_str})>"
 
 
-def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
+def call_builtin(func: Function, *params: Any) -> Tuple[bool, Any]:
     uses_non_warp_array_type = False
 
     init()
@@ -754,37 +765,51 @@ class Kernel:
 
 
 # decorator to register function, @func
-def func(f):
-    name = warp.codegen.make_full_qualified_name(f)
+def func(f: Optional[Callable] = None, *, name: Optional[str] = None):
+    def wrapper(f, *args, **kwargs):
+        if name is None:
+            key = warp.codegen.make_full_qualified_name(f)
+        else:
+            key = name
 
-    scope_locals = inspect.currentframe().f_back.f_locals
+        scope_locals = inspect.currentframe().f_back.f_back.f_locals
 
-    m = get_module(f.__module__)
-    doc = getattr(f, "__doc__", "") or ""
-    Function(
-        func=f,
-        key=name,
-        namespace="",
-        module=m,
-        value_func=None,
-        scope_locals=scope_locals,
-        doc=doc.strip(),
-    )  # value_type not known yet, will be inferred during Adjoint.build()
+        m = get_module(f.__module__)
+        doc = getattr(f, "__doc__", "") or ""
+        Function(
+            func=f,
+            key=key,
+            namespace="",
+            module=m,
+            value_func=None,
+            scope_locals=scope_locals,
+            doc=doc.strip(),
+        )  # value_type not known yet, will be inferred during Adjoint.build()
 
-    # use the top of the list of overloads for this key
-    g = m.functions[name]
-    # copy over the function attributes, including docstring
-    return functools.update_wrapper(g, f)
+        # use the top of the list of overloads for this key
+        g = m.functions[key]
+        # copy over the function attributes, including docstring
+        return functools.update_wrapper(g, f)
+
+    if f is None:
+        # Arguments were passed to the decorator.
+        return wrapper
+
+    return wrapper(f)
 
 
-def func_native(snippet, adj_snippet=None, replay_snippet=None):
+def func_native(snippet: str, adj_snippet: Optional[str] = None, replay_snippet: Optional[str] = None):
     """
     Decorator to register native code snippet, @func_native
     """
 
-    scope_locals = inspect.currentframe().f_back.f_locals
+    frame = inspect.currentframe()
+    if frame is None or frame.f_back is None:
+        scope_locals = {}
+    else:
+        scope_locals = frame.f_back.f_locals
 
-    def snippet_func(f):
+    def snippet_func(f: Callable) -> Callable:
         name = warp.codegen.make_full_qualified_name(f)
 
         m = get_module(f.__module__)
@@ -958,7 +983,7 @@ def func_replay(forward_fn):
 
 # decorator to register kernel, @kernel, custom_name may be a string
 # that creates a kernel with a different name from the actual function
-def kernel(f=None, *, enable_backward=None):
+def kernel(f: Optional[Callable] = None, *, enable_backward: Optional[bool] = None):
     def wrapper(f, *args, **kwargs):
         options = {}
 
@@ -983,7 +1008,7 @@ def kernel(f=None, *, enable_backward=None):
 
 
 # decorator to register struct, @struct
-def struct(c):
+def struct(c: type):
     m = get_module(c.__module__)
     s = warp.codegen.Struct(cls=c, key=warp.codegen.make_full_qualified_name(c), module=m)
     s = functools.update_wrapper(s, c)
@@ -1096,47 +1121,47 @@ scalar_types.update({x: x._wp_scalar_type_ for x in warp.types.vector_types})
 
 
 def add_builtin(
-    key,
-    input_types=None,
-    constraint=None,
-    value_type=None,
-    value_func=None,
-    export_func=None,
-    dispatch_func=None,
-    lto_dispatch_func=None,
-    doc="",
-    namespace="wp::",
-    variadic=False,
+    key: str,
+    input_types: Optional[Dict[str, Union[type, TypeVar]]] = None,
+    constraint: Optional[Callable[[Mapping[str, type]], bool]] = None,
+    value_type: Optional[type] = None,
+    value_func: Optional[Callable] = None,
+    export_func: Optional[Callable] = None,
+    dispatch_func: Optional[Callable] = None,
+    lto_dispatch_func: Optional[Callable] = None,
+    doc: str = "",
+    namespace: str = "wp::",
+    variadic: bool = False,
     initializer_list_func=None,
-    export=True,
-    group="Other",
-    hidden=False,
-    skip_replay=False,
-    missing_grad=False,
-    native_func=None,
-    defaults=None,
-    require_original_output_arg=False,
+    export: bool = True,
+    group: str = "Other",
+    hidden: bool = False,
+    skip_replay: bool = False,
+    missing_grad: bool = False,
+    native_func: Optional[str] = None,
+    defaults: Optional[Dict[str, Any]] = None,
+    require_original_output_arg: bool = False,
 ):
     """Main entry point to register a new built-in function.
 
     Args:
-        key (str): Function name. Multiple overloaded functions can be registered
+        key: Function name. Multiple overloaded functions can be registered
             under the same name as long as their signature differ.
-        input_types (Mapping[str, Any]): Signature of the user-facing function.
+        input_types: Signature of the user-facing function.
             Variadic arguments are supported by prefixing the parameter names
             with asterisks as in `*args` and `**kwargs`. Generic arguments are
             supported with types such as `Any`, `Float`, `Scalar`, etc.
-        constraint (Callable): For functions that define generic arguments and
+        constraint: For functions that define generic arguments and
             are to be exported, this callback is used to specify whether some
             combination of inferred arguments are valid or not.
-        value_type (Any): Type returned by the function.
-        value_func (Callable): Callback used to specify the return type when
+        value_type: Type returned by the function.
+        value_func: Callback used to specify the return type when
             `value_type` isn't enough.
-        export_func (Callable): Callback used during the context stage to specify
+        export_func: Callback used during the context stage to specify
             the signature of the underlying C++ function, not accounting for
             the template parameters.
             If not provided, `input_types` is used.
-        dispatch_func (Callable): Callback used during the codegen stage to specify
+        dispatch_func: Callback used during the codegen stage to specify
             the runtime and template arguments to be passed to the underlying C++
             function. In other words, this allows defining a mapping between
             the signatures of the user-facing and the C++ functions, and even to
@@ -1144,27 +1169,26 @@ def add_builtin(
             The arguments returned must be of type `codegen.Var`.
             If not provided, all arguments passed by the users when calling
             the built-in are passed as-is as runtime arguments to the C++ function.
-        lto_dispatch_func (Callable): Same as dispatch_func, but takes an 'option' dict
+        lto_dispatch_func: Same as dispatch_func, but takes an 'option' dict
             as extra argument (indicating tile_size and target architecture) and returns
             an LTO-IR buffer as extra return value
-        doc (str): Used to generate the Python's docstring and the HTML documentation.
+        doc: Used to generate the Python's docstring and the HTML documentation.
         namespace: Namespace for the underlying C++ function.
-        variadic (bool): Whether the function declares variadic arguments.
-        initializer_list_func (bool): Whether to use the initializer list syntax
-            when passing the arguments to the underlying C++ function.
-        export (bool): Whether the function is to be exposed to the Python
+        variadic: Whether the function declares variadic arguments.
+        initializer_list_func: Callback to determine whether to use the
+            initializer list syntax when passing the arguments to the underlying
+            C++ function.
+        export: Whether the function is to be exposed to the Python
             interpreter so that it becomes available from within the `warp`
             module.
-        group (str): Classification used for the documentation.
-        hidden (bool): Whether to add that function into the documentation.
-        skip_replay (bool): Whether operation will be performed during
+        group: Classification used for the documentation.
+        hidden: Whether to add that function into the documentation.
+        skip_replay: Whether operation will be performed during
             the forward replay in the backward pass.
-        missing_grad (bool): Whether the function is missing a corresponding
-            adjoint.
-        native_func (str): Name of the underlying C++ function.
-        defaults (Mapping[str, Any]): Default values for the parameters defined
-            in `input_types`.
-        require_original_output_arg (bool): Used during the codegen stage to
+        missing_grad: Whether the function is missing a corresponding adjoint.
+        native_func: Name of the underlying C++ function.
+        defaults: Default values for the parameters defined in `input_types`.
+        require_original_output_arg: Used during the codegen stage to
             specify whether an adjoint parameter corresponding to the return
             value should be included in the signature of the backward function.
     """
@@ -1346,19 +1370,14 @@ def add_builtin(
 def register_api_function(
     function: Function,
     group: str = "Other",
-    hidden=False,
+    hidden: bool = False,
 ):
     """Main entry point to register a Warp Python function to be part of the Warp API and appear in the documentation.
 
     Args:
-        function (Function): Warp function to be registered.
-        group (str): Classification used for the documentation.
-        input_types (Mapping[str, Any]): Signature of the user-facing function.
-            Variadic arguments are supported by prefixing the parameter names
-            with asterisks as in `*args` and `**kwargs`. Generic arguments are
-            supported with types such as `Any`, `Float`, `Scalar`, etc.
-        value_type (Any): Type returned by the function.
-        hidden (bool): Whether to add that function into the documentation.
+        function: Warp function to be registered.
+        group: Classification used for the documentation.
+        hidden: Whether to add that function into the documentation.
     """
     function.group = group
     function.hidden = hidden
@@ -1366,10 +1385,10 @@ def register_api_function(
 
 
 # global dictionary of modules
-user_modules = {}
+user_modules: Dict[str, Module] = {}
 
 
-def get_module(name):
+def get_module(name: str) -> Module:
     # some modules might be manually imported using `importlib` without being
     # registered into `sys.modules`
     parent = sys.modules.get(name, None)
@@ -1457,7 +1476,7 @@ class ModuleHasher:
         # save the module hash
         self.module_hash = ch.digest()
 
-    def hash_kernel(self, kernel):
+    def hash_kernel(self, kernel: Kernel) -> bytes:
         # NOTE: We only hash non-generic kernels, so we don't traverse kernel overloads here.
 
         ch = hashlib.sha256()
@@ -1471,7 +1490,7 @@ class ModuleHasher:
 
         return h
 
-    def hash_function(self, func):
+    def hash_function(self, func: Function) -> bytes:
         # NOTE: This method hashes all possible overloads that a function call could resolve to.
         # The exact overload will be resolved at build time, when the argument types are known.
 
@@ -1486,7 +1505,7 @@ class ModuleHasher:
         ch.update(bytes(func.key, "utf-8"))
 
         # include all concrete and generic overloads
-        overloads = {**func.user_overloads, **func.user_templates}
+        overloads: Dict[str, Function] = {**func.user_overloads, **func.user_templates}
         for sig in sorted(overloads.keys()):
             ovl = overloads[sig]
 
@@ -1517,7 +1536,7 @@ class ModuleHasher:
 
         return h
 
-    def hash_adjoint(self, adj):
+    def hash_adjoint(self, adj: warp.codegen.Adjoint) -> bytes:
         # NOTE: We don't cache adjoint hashes, because adjoints are always unique.
         # Even instances of generic kernels and functions have unique adjoints with
         # different argument types.
@@ -1566,7 +1585,7 @@ class ModuleHasher:
 
         return ch.digest()
 
-    def get_constant_bytes(self, value):
+    def get_constant_bytes(self, value) -> bytes:
         if isinstance(value, int):
             # this also handles builtins.bool
             return bytes(ctypes.c_int(value))
@@ -1584,7 +1603,7 @@ class ModuleHasher:
         else:
             raise TypeError(f"Invalid constant type: {type(value)}")
 
-    def get_module_hash(self):
+    def get_module_hash(self) -> bytes:
         return self.module_hash
 
     def get_unique_kernels(self):
@@ -1601,6 +1620,7 @@ class ModuleBuilder:
         self.fatbins = {}  # map from <some identifier> to fatbins, to add at link time
         self.ltoirs = {}  # map from lto symbol to lto binary
         self.ltoirs_decl = {}  # map from lto symbol to lto forward declaration
+        self.shared_memory_bytes = {}  # map from lto symbol to shared memory requirements
 
         if hasher is None:
             hasher = ModuleHasher(module)
@@ -1717,9 +1737,9 @@ class ModuleBuilder:
 
         # add headers
         if device == "cpu":
-            source = warp.codegen.cpu_module_header.format(tile_size=self.options["block_dim"]) + source
+            source = warp.codegen.cpu_module_header.format(block_dim=self.options["block_dim"]) + source
         else:
-            source = warp.codegen.cuda_module_header.format(tile_size=self.options["block_dim"]) + source
+            source = warp.codegen.cuda_module_header.format(block_dim=self.options["block_dim"]) + source
 
         return source
 
@@ -1756,7 +1776,7 @@ class ModuleExec:
                 runtime.llvm.unload_obj(self.handle.encode("utf-8"))
 
     # lookup and cache kernel entry points
-    def get_kernel_hooks(self, kernel):
+    def get_kernel_hooks(self, kernel) -> KernelHooks:
         # Use kernel.adj as a unique key for cache lookups instead of the kernel itself.
         # This avoids holding a reference to the kernel and is faster than using
         # a WeakKeyDictionary with kernels as keys.
@@ -2185,34 +2205,8 @@ class Module:
                 # -----------------------------------------------------------
                 # update cache
 
-                def safe_rename(src, dst, attempts=5, delay=0.1):
-                    for i in range(attempts):
-                        try:
-                            os.rename(src, dst)
-                            return
-                        except FileExistsError:
-                            return
-                        except OSError as e:
-                            if e.errno == errno.ENOTEMPTY:
-                                # if directory exists we assume another process
-                                # got there first, in which case we will copy
-                                # our output to the directory manually in second step
-                                return
-                            else:
-                                # otherwise assume directory creation failed e.g.: access denied
-                                # on Windows we see occasional failures to rename directories due to
-                                # some process holding a lock on a file to be moved to workaround
-                                # this we make multiple attempts to rename with some delay
-                                if i < attempts - 1:
-                                    time.sleep(delay)
-                                else:
-                                    print(
-                                        f"Could not update Warp cache with module binaries, trying to rename {build_dir} to {module_dir}, error {e}"
-                                    )
-                                    raise e
-
                 # try to move process outputs to cache
-                safe_rename(build_dir, module_dir)
+                warp.build.safe_rename(build_dir, module_dir)
 
                 if os.path.exists(module_dir):
                     if not os.path.exists(binary_path):
@@ -2285,7 +2279,7 @@ class Module:
         self.failed_builds = set()
 
     # lookup kernel entry points based on name, called after compilation / module load
-    def get_kernel_hooks(self, kernel, device):
+    def get_kernel_hooks(self, kernel, device: Device) -> KernelHooks:
         module_exec = self.execs.get((device.context, self.options["block_dim"]))
         if module_exec is not None:
             return module_exec.get_kernel_hooks(kernel)
@@ -2440,6 +2434,7 @@ class Event:
             raise RuntimeError(f"Device {device} is not a CUDA device")
 
         self.device = device
+        self.enable_timing = enable_timing
 
         if cuda_event is not None:
             self.cuda_event = cuda_event
@@ -2503,7 +2498,7 @@ class Stream:
         instance.owner = False
         return instance
 
-    def __init__(self, device: Optional[Union["Device", str]] = None, priority: int = 0, **kwargs):
+    def __init__(self, device: Union["Device", str, None] = None, priority: int = 0, **kwargs):
         """Initialize the stream on a device with an optional specified priority.
 
         Args:
@@ -2587,7 +2582,7 @@ class Stream:
                 f"Event from device {event.device} cannot be recorded on stream from device {self.device}"
             )
 
-        runtime.core.cuda_event_record(event.cuda_event, self.cuda_stream)
+        runtime.core.cuda_event_record(event.cuda_event, self.cuda_stream, event.enable_timing)
 
         return event
 
@@ -2943,18 +2938,14 @@ Devicelike = Union[Device, str, None]
 
 
 class Graph:
-    def __new__(cls, *args, **kwargs):
-        instance = super(Graph, cls).__new__(cls)
-        instance.graph_exec = None
-        return instance
-
     def __init__(self, device: Device, capture_id: int):
         self.device = device
         self.capture_id = capture_id
-        self.module_execs = set()
+        self.module_execs: Set[ModuleExec] = set()
+        self.graph_exec: Optional[ctypes.c_void_p] = None
 
     def __del__(self):
-        if not self.graph_exec:
+        if not hasattr(self, "graph_exec") or not hasattr(self, "device") or not self.graph_exec:
             return
 
         # use CUDA context guard to avoid side effects during garbage collection
@@ -3195,6 +3186,43 @@ class Runtime:
 
             self.core.radix_sort_pairs_float_host.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_int]
             self.core.radix_sort_pairs_float_device.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_int]
+
+            self.core.radix_sort_pairs_int64_host.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_int]
+            self.core.radix_sort_pairs_int64_device.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_int]
+
+            self.core.segmented_sort_pairs_int_host.argtypes = [
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+            ]
+            self.core.segmented_sort_pairs_int_device.argtypes = [
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+            ]
+
+            self.core.segmented_sort_pairs_float_host.argtypes = [
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+            ]
+            self.core.segmented_sort_pairs_float_device.argtypes = [
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                ctypes.c_int,
+            ]
 
             self.core.runlength_encode_int_host.argtypes = [
                 ctypes.c_uint64,
@@ -3548,7 +3576,7 @@ class Runtime:
             self.core.cuda_event_create.restype = ctypes.c_void_p
             self.core.cuda_event_destroy.argtypes = [ctypes.c_void_p]
             self.core.cuda_event_destroy.restype = None
-            self.core.cuda_event_record.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self.core.cuda_event_record.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
             self.core.cuda_event_record.restype = None
             self.core.cuda_event_synchronize.argtypes = [ctypes.c_void_p]
             self.core.cuda_event_synchronize.restype = None
@@ -3812,6 +3840,11 @@ class Runtime:
             greeting = []
 
             greeting.append(f"Warp {warp.config.version} initialized:")
+
+            # Add git commit hash to greeting if available
+            if warp.config._git_commit_hash is not None:
+                greeting.append(f"   Git commit: {warp.config._git_commit_hash}")
+
             if cuda_device_count > 0:
                 # print CUDA version info
                 greeting.append(
@@ -4164,7 +4197,7 @@ def set_device(ident: Devicelike) -> None:
     device.make_current()
 
 
-def map_cuda_device(alias: str, context: ctypes.c_void_p = None) -> Device:
+def map_cuda_device(alias: str, context: Optional[ctypes.c_void_p] = None) -> Device:
     """Assign a device alias to a CUDA context.
 
     This function can be used to create a wp.Device for an external CUDA context.
@@ -4591,7 +4624,7 @@ def wait_event(event: Event):
     get_stream().wait_event(event)
 
 
-def get_event_elapsed_time(start_event: Event, end_event: Event, synchronize: Optional[bool] = True):
+def get_event_elapsed_time(start_event: Event, end_event: Event, synchronize: bool = True):
     """Get the elapsed time between two recorded events.
 
     Both events must have been previously recorded with
@@ -4616,7 +4649,7 @@ def get_event_elapsed_time(start_event: Event, end_event: Event, synchronize: Op
     return runtime.core.cuda_event_elapsed_time(start_event.cuda_event, end_event.cuda_event)
 
 
-def wait_stream(other_stream: Stream, event: Event = None):
+def wait_stream(other_stream: Stream, event: Optional[Event] = None):
     """Convenience function for calling :meth:`Stream.wait_stream` on the current stream.
 
     Args:
@@ -4783,7 +4816,7 @@ class RegisteredGLBuffer:
 
 
 def zeros(
-    shape: Tuple = None,
+    shape: Union[int, Tuple[int, ...], List[int], None] = None,
     dtype=float,
     device: Devicelike = None,
     requires_grad: bool = False,
@@ -4811,7 +4844,7 @@ def zeros(
 
 
 def zeros_like(
-    src: warp.array, device: Devicelike = None, requires_grad: bool = None, pinned: bool = None
+    src: Array, device: Devicelike = None, requires_grad: Optional[bool] = None, pinned: Optional[bool] = None
 ) -> warp.array:
     """Return a zero-initialized array with the same type and dimension of another array
 
@@ -4833,7 +4866,7 @@ def zeros_like(
 
 
 def ones(
-    shape: Tuple = None,
+    shape: Union[int, Tuple[int, ...], List[int], None] = None,
     dtype=float,
     device: Devicelike = None,
     requires_grad: bool = False,
@@ -4857,7 +4890,7 @@ def ones(
 
 
 def ones_like(
-    src: warp.array, device: Devicelike = None, requires_grad: bool = None, pinned: bool = None
+    src: Array, device: Devicelike = None, requires_grad: Optional[bool] = None, pinned: Optional[bool] = None
 ) -> warp.array:
     """Return a one-initialized array with the same type and dimension of another array
 
@@ -4875,7 +4908,7 @@ def ones_like(
 
 
 def full(
-    shape: Tuple = None,
+    shape: Union[int, Tuple[int, ...], List[int], None] = None,
     value=0,
     dtype=Any,
     device: Devicelike = None,
@@ -4941,7 +4974,11 @@ def full(
 
 
 def full_like(
-    src: warp.array, value: Any, device: Devicelike = None, requires_grad: bool = None, pinned: bool = None
+    src: Array,
+    value: Any,
+    device: Devicelike = None,
+    requires_grad: Optional[bool] = None,
+    pinned: Optional[bool] = None,
 ) -> warp.array:
     """Return an array with all elements initialized to the given value with the same type and dimension of another array
 
@@ -4963,7 +5000,9 @@ def full_like(
     return arr
 
 
-def clone(src: warp.array, device: Devicelike = None, requires_grad: bool = None, pinned: bool = None) -> warp.array:
+def clone(
+    src: warp.array, device: Devicelike = None, requires_grad: Optional[bool] = None, pinned: Optional[bool] = None
+) -> warp.array:
     """Clone an existing array, allocates a copy of the src memory
 
     Args:
@@ -4984,7 +5023,7 @@ def clone(src: warp.array, device: Devicelike = None, requires_grad: bool = None
 
 
 def empty(
-    shape: Tuple = None,
+    shape: Union[int, Tuple[int, ...], List[int], None] = None,
     dtype=float,
     device: Devicelike = None,
     requires_grad: bool = False,
@@ -5017,7 +5056,7 @@ def empty(
 
 
 def empty_like(
-    src: warp.array, device: Devicelike = None, requires_grad: bool = None, pinned: bool = None
+    src: Array, device: Devicelike = None, requires_grad: Optional[bool] = None, pinned: Optional[bool] = None
 ) -> warp.array:
     """Return an uninitialized array with the same type and dimension of another array
 
@@ -5249,11 +5288,24 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
             ) from e
 
 
-# represents all data required for a kernel launch
-# so that launches can be replayed quickly, use `wp.launch(..., record_cmd=True)`
 class Launch:
+    """Represents all data required for a kernel launch so that launches can be replayed quickly.
+
+    Users should not directly instantiate this class, instead use
+    ``wp.launch(..., record_cmd=True)`` to record a launch.
+    """
+
     def __init__(
-        self, kernel, device, hooks=None, params=None, params_addr=None, bounds=None, max_blocks=0, block_dim=256
+        self,
+        kernel,
+        device: Device,
+        hooks: Optional[KernelHooks] = None,
+        params: Optional[Sequence[Any]] = None,
+        params_addr: Optional[Sequence[ctypes.c_void_p]] = None,
+        bounds: Optional[launch_bounds_t] = None,
+        max_blocks: int = 0,
+        block_dim: int = 256,
+        adjoint: bool = False,
     ):
         # retain the module executable so it doesn't get unloaded
         self.module_exec = kernel.module.load(device)
@@ -5266,13 +5318,14 @@ class Launch:
 
         # if not specified set a zero bound
         if not bounds:
-            bounds = warp.types.launch_bounds_t(0)
+            bounds = launch_bounds_t(0)
 
         # if not specified then build a list of default value params for args
         if not params:
             params = []
             params.append(bounds)
 
+            # Pack forward parameters
             for a in kernel.adj.args:
                 if isinstance(a.type, warp.types.array):
                     params.append(a.type.__ctype__())
@@ -5281,6 +5334,18 @@ class Launch:
                 else:
                     params.append(pack_arg(kernel, a.type, a.label, 0, device, False))
 
+            # Pack adjoint parameters if adjoint=True
+            if adjoint:
+                for a in kernel.adj.args:
+                    if isinstance(a.type, warp.types.array):
+                        params.append(a.type.__ctype__())
+                    elif isinstance(a.type, warp.codegen.Struct):
+                        params.append(a.type().__ctype__())
+                    else:
+                        # For primitive types in adjoint mode, initialize with 0
+                        params.append(pack_arg(kernel, a.type, a.label, 0, device, True))
+
+            # Create array of parameter addresses
             kernel_args = [ctypes.c_void_p(ctypes.addressof(x)) for x in params]
             kernel_params = (ctypes.c_void_p * len(kernel_args))(*kernel_args)
 
@@ -5290,13 +5355,30 @@ class Launch:
         self.hooks = hooks
         self.params = params
         self.params_addr = params_addr
-        self.device = device
-        self.bounds = bounds
-        self.max_blocks = max_blocks
-        self.block_dim = block_dim
+        self.device: Device = device
+        """The device to launch on.
+        This should not be changed after the launch object is created.
+        """
 
-    def set_dim(self, dim):
-        self.bounds = warp.types.launch_bounds_t(dim)
+        self.bounds: launch_bounds_t = bounds
+        """The launch bounds. Update with :meth:`set_dim`."""
+
+        self.max_blocks: int = max_blocks
+        """The maximum number of CUDA thread blocks to use."""
+
+        self.block_dim: int = block_dim
+        """The number of threads per block."""
+
+        self.adjoint: bool = adjoint
+        """Whether to run the adjoint kernel instead of the forward kernel."""
+
+    def set_dim(self, dim: Union[int, List[int], Tuple[int, ...]]):
+        """Set the launch dimensions.
+
+        Args:
+            dim: The dimensions of the launch.
+        """
+        self.bounds = launch_bounds_t(dim)
 
         # launch bounds always at index 0
         self.params[0] = self.bounds
@@ -5305,22 +5387,36 @@ class Launch:
         if self.params_addr:
             self.params_addr[0] = ctypes.c_void_p(ctypes.addressof(self.bounds))
 
-    # set kernel param at an index, will convert to ctype as necessary
-    def set_param_at_index(self, index, value):
+    def set_param_at_index(self, index: int, value: Any, adjoint: bool = False):
+        """Set a kernel parameter at an index.
+
+        Args:
+            index: The index of the param to set.
+            value: The value to set the param to.
+        """
         arg_type = self.kernel.adj.args[index].type
         arg_name = self.kernel.adj.args[index].label
 
-        carg = pack_arg(self.kernel, arg_type, arg_name, value, self.device, False)
+        carg = pack_arg(self.kernel, arg_type, arg_name, value, self.device, adjoint)
 
-        self.params[index + 1] = carg
+        if adjoint:
+            params_index = index + len(self.kernel.adj.args) + 1
+        else:
+            params_index = index + 1
+
+        self.params[params_index] = carg
 
         # for CUDA kernels we need to update the address to each arg
         if self.params_addr:
-            self.params_addr[index + 1] = ctypes.c_void_p(ctypes.addressof(carg))
+            self.params_addr[params_index] = ctypes.c_void_p(ctypes.addressof(carg))
 
-    # set kernel param at an index without any type conversion
-    # args must be passed as ctypes or basic int / float types
-    def set_param_at_index_from_ctype(self, index, value):
+    def set_param_at_index_from_ctype(self, index: int, value: Union[ctypes.Structure, int, float]):
+        """Set a kernel parameter at an index without any type conversion.
+
+        Args:
+            index: The index of the param to set.
+            value: The value to set the param to.
+        """
         if isinstance(value, ctypes.Structure):
             # not sure how to directly assign struct->struct without reallocating using ctypes
             self.params[index + 1] = value
@@ -5332,32 +5428,62 @@ class Launch:
         else:
             self.params[index + 1].__init__(value)
 
-    # set kernel param by argument name
-    def set_param_by_name(self, name, value):
+    def set_param_by_name(self, name: str, value: Any, adjoint: bool = False):
+        """Set a kernel parameter by argument name.
+
+        Args:
+            name: The name of the argument to set.
+            value: The value to set the argument to.
+            adjoint: If ``True``, set the adjoint of this parameter instead of the forward parameter.
+        """
         for i, arg in enumerate(self.kernel.adj.args):
             if arg.label == name:
-                self.set_param_at_index(i, value)
+                self.set_param_at_index(i, value, adjoint)
+                return
 
-    # set kernel param by argument name with no type conversions
-    def set_param_by_name_from_ctype(self, name, value):
+        raise ValueError(f"Argument '{name}' not found in kernel '{self.kernel.key}'")
+
+    def set_param_by_name_from_ctype(self, name: str, value: ctypes.Structure):
+        """Set a kernel parameter by argument name with no type conversions.
+
+        Args:
+            name: The name of the argument to set.
+            value: The value to set the argument to.
+        """
         # lookup argument index
         for i, arg in enumerate(self.kernel.adj.args):
             if arg.label == name:
                 self.set_param_at_index_from_ctype(i, value)
 
-    # set all params
-    def set_params(self, values):
+    def set_params(self, values: Sequence[Any]):
+        """Set all parameters.
+
+        Args:
+            values: A list of values to set the params to.
+        """
         for i, v in enumerate(values):
             self.set_param_at_index(i, v)
 
-    # set all params without performing type-conversions
-    def set_params_from_ctypes(self, values):
+    def set_params_from_ctypes(self, values: Sequence[ctypes.Structure]):
+        """Set all parameters without performing type-conversions.
+
+        Args:
+            values: A list of ctypes or basic int / float types.
+        """
         for i, v in enumerate(values):
             self.set_param_at_index_from_ctype(i, v)
 
-    def launch(self, stream=None) -> Any:
+    def launch(self, stream: Optional[Stream] = None) -> None:
+        """Launch the kernel.
+
+        Args:
+            stream: The stream to launch on.
+        """
         if self.device.is_cpu:
-            self.hooks.forward(*self.params)
+            if self.adjoint:
+                self.hooks.backward(*self.params)
+            else:
+                self.hooks.forward(*self.params)
         else:
             if stream is None:
                 stream = self.device.stream
@@ -5370,32 +5496,44 @@ class Launch:
                 if graph is not None:
                     graph.retain_module_exec(self.module_exec)
 
-            runtime.core.cuda_launch_kernel(
-                self.device.context,
-                self.hooks.forward,
-                self.bounds.size,
-                self.max_blocks,
-                self.block_dim,
-                self.hooks.forward_smem_bytes,
-                self.params_addr,
-                stream.cuda_stream,
-            )
+            if self.adjoint:
+                runtime.core.cuda_launch_kernel(
+                    self.device.context,
+                    self.hooks.backward,
+                    self.bounds.size,
+                    self.max_blocks,
+                    self.block_dim,
+                    self.hooks.backward_smem_bytes,
+                    self.params_addr,
+                    stream.cuda_stream,
+                )
+            else:
+                runtime.core.cuda_launch_kernel(
+                    self.device.context,
+                    self.hooks.forward,
+                    self.bounds.size,
+                    self.max_blocks,
+                    self.block_dim,
+                    self.hooks.forward_smem_bytes,
+                    self.params_addr,
+                    stream.cuda_stream,
+                )
 
 
 def launch(
     kernel,
-    dim: Tuple[int],
+    dim: Union[int, Sequence[int]],
     inputs: Sequence = [],
     outputs: Sequence = [],
     adj_inputs: Sequence = [],
     adj_outputs: Sequence = [],
     device: Devicelike = None,
-    stream: Stream = None,
-    adjoint=False,
-    record_tape=True,
-    record_cmd=False,
-    max_blocks=0,
-    block_dim=256,
+    stream: Optional[Stream] = None,
+    adjoint: bool = False,
+    record_tape: bool = True,
+    record_cmd: bool = False,
+    max_blocks: int = 0,
+    block_dim: int = 256,
 ):
     """Launch a Warp kernel on the target device
 
@@ -5403,19 +5541,24 @@ def launch(
 
     Args:
         kernel: The name of a Warp kernel function, decorated with the ``@wp.kernel`` decorator
-        dim: The number of threads to launch the kernel, can be an integer, or a Tuple of ints with max of 4 dimensions
+        dim: The number of threads to launch the kernel, can be an integer or a
+          sequence of integers with a maximum of 4 dimensions.
         inputs: The input parameters to the kernel (optional)
         outputs: The output parameters (optional)
         adj_inputs: The adjoint inputs (optional)
         adj_outputs: The adjoint outputs (optional)
-        device: The device to launch on (optional)
-        stream: The stream to launch on (optional)
-        adjoint: Whether to run forward or backward pass (typically use False)
-        record_tape: When true the launch will be recorded the global wp.Tape() object when present
-        record_cmd: When True the launch will be returned as a ``Launch`` command object, the launch will not occur until the user calls ``cmd.launch()``
-        max_blocks: The maximum number of CUDA thread blocks to use. Only has an effect for CUDA kernel launches.
-            If negative or zero, the maximum hardware value will be used.
-        block_dim: The number of threads per block.
+        device: The device to launch on.
+        stream: The stream to launch on.
+        adjoint: Whether to run forward or backward pass (typically use ``False``).
+        record_tape: When ``True``, the launch will be recorded the global
+          :class:`wp.Tape() <warp.Tape>` object when present.
+        record_cmd: When ``True``, the launch will return a :class:`Launch`
+          object. The launch will not occur until the user calls
+          :meth:`Launch.launch()`.
+        max_blocks: The maximum number of CUDA thread blocks to use.
+          Only has an effect for CUDA kernel launches.
+          If negative or zero, the maximum hardware value will be used.
+        block_dim: The number of threads per block (always 1 for "cpu" devices).
     """
 
     init()
@@ -5426,6 +5569,9 @@ def launch(
     else:
         device = runtime.get_device(device)
 
+    if device == "cpu":
+        block_dim = 1
+
     # check function is a Kernel
     if not isinstance(kernel, Kernel):
         raise RuntimeError("Error launching kernel, can only launch functions decorated with @wp.kernel.")
@@ -5435,7 +5581,7 @@ def launch(
         print(f"kernel: {kernel.key} dim: {dim} inputs: {inputs} outputs: {outputs} device: {device}")
 
     # construct launch bounds
-    bounds = warp.types.launch_bounds_t(dim)
+    bounds = launch_bounds_t(dim)
 
     if bounds.size > 0:
         # first param is the number of threads
@@ -5492,6 +5638,17 @@ def launch(
                         f"Failed to find backward kernel '{kernel.key}' from module '{kernel.module.name}' for device '{device}'"
                     )
 
+                if record_cmd:
+                    launch = Launch(
+                        kernel=kernel,
+                        hooks=hooks,
+                        params=params,
+                        params_addr=None,
+                        bounds=bounds,
+                        device=device,
+                        adjoint=adjoint,
+                    )
+                    return launch
                 hooks.backward(*params)
 
             else:
@@ -5502,7 +5659,13 @@ def launch(
 
                 if record_cmd:
                     launch = Launch(
-                        kernel=kernel, hooks=hooks, params=params, params_addr=None, bounds=bounds, device=device
+                        kernel=kernel,
+                        hooks=hooks,
+                        params=params,
+                        params_addr=None,
+                        bounds=bounds,
+                        device=device,
+                        adjoint=adjoint,
                     )
                     return launch
                 else:
@@ -5529,16 +5692,30 @@ def launch(
                         f"Failed to find backward kernel '{kernel.key}' from module '{kernel.module.name}' for device '{device}'"
                     )
 
-                runtime.core.cuda_launch_kernel(
-                    device.context,
-                    hooks.backward,
-                    bounds.size,
-                    max_blocks,
-                    block_dim,
-                    hooks.backward_smem_bytes,
-                    kernel_params,
-                    stream.cuda_stream,
-                )
+                if record_cmd:
+                    launch = Launch(
+                        kernel=kernel,
+                        hooks=hooks,
+                        params=params,
+                        params_addr=kernel_params,
+                        bounds=bounds,
+                        device=device,
+                        max_blocks=max_blocks,
+                        block_dim=block_dim,
+                        adjoint=adjoint,
+                    )
+                    return launch
+                else:
+                    runtime.core.cuda_launch_kernel(
+                        device.context,
+                        hooks.backward,
+                        bounds.size,
+                        max_blocks,
+                        block_dim,
+                        hooks.backward_smem_bytes,
+                        kernel_params,
+                        stream.cuda_stream,
+                    )
 
             else:
                 if hooks.forward is None:
@@ -5558,7 +5735,6 @@ def launch(
                         block_dim=block_dim,
                     )
                     return launch
-
                 else:
                     # launch
                     runtime.core.cuda_launch_kernel(
@@ -5627,6 +5803,18 @@ def launch_tiled(*args, **kwargs):
         raise RuntimeError(
             "Launch block dimension 'block_dim' argument should be passed via. keyword args for wp.launch_tiled()"
         )
+
+    if "device" in kwargs:
+        device = kwargs["device"]
+    else:
+        # todo: this doesn't consider the case where device
+        # is passed through positional args
+        device = None
+
+    # force the block_dim to 1 if running on "cpu"
+    device = runtime.get_device(device)
+    if device.is_cpu:
+        kwargs["block_dim"] = 1
 
     dim = kwargs["dim"]
     if not isinstance(dim, list):
@@ -5796,6 +5984,7 @@ def set_module_options(options: Dict[str, Any], module: Optional[Any] = None):
 
     * **mode**: The compilation mode to use, can be "debug", or "release", defaults to the value of ``warp.config.mode``.
     * **max_unroll**: The maximum fixed-size loop to unroll, defaults to the value of ``warp.config.max_unroll``.
+    * **block_dim**: The default number of threads to assign to each block
 
     Args:
 
@@ -5821,7 +6010,12 @@ def get_module_options(module: Optional[Any] = None) -> Dict[str, Any]:
     return get_module(m.__name__).options
 
 
-def capture_begin(device: Devicelike = None, stream=None, force_module_load=None, external=False):
+def capture_begin(
+    device: Devicelike = None,
+    stream: Optional[Stream] = None,
+    force_module_load: Optional[bool] = None,
+    external: bool = False,
+):
     """Begin capture of a CUDA graph
 
     Captures all subsequent kernel launches and memory operations on CUDA devices.
@@ -5888,16 +6082,15 @@ def capture_begin(device: Devicelike = None, stream=None, force_module_load=None
     runtime.captures[capture_id] = graph
 
 
-def capture_end(device: Devicelike = None, stream: Stream = None) -> Graph:
-    """Ends the capture of a CUDA graph
+def capture_end(device: Devicelike = None, stream: Optional[Stream] = None) -> Graph:
+    """End the capture of a CUDA graph.
 
     Args:
-
         device: The CUDA device where capture began
         stream: The CUDA stream where capture began
 
     Returns:
-        A Graph object that can be launched with :func:`~warp.capture_launch()`
+        A :class:`Graph` object that can be launched with :func:`~warp.capture_launch()`
     """
 
     if stream is not None:
@@ -5931,12 +6124,12 @@ def capture_end(device: Devicelike = None, stream: Stream = None) -> Graph:
     return graph
 
 
-def capture_launch(graph: Graph, stream: Stream = None):
+def capture_launch(graph: Graph, stream: Optional[Stream] = None):
     """Launch a previously captured CUDA graph
 
     Args:
-        graph: A Graph as returned by :func:`~warp.capture_end()`
-        stream: A Stream to launch the graph on (optional)
+        graph: A :class:`Graph` as returned by :func:`~warp.capture_end()`
+        stream: A :class:`Stream` to launch the graph on
     """
 
     if stream is not None:
@@ -5952,24 +6145,28 @@ def capture_launch(graph: Graph, stream: Stream = None):
 
 
 def copy(
-    dest: warp.array, src: warp.array, dest_offset: int = 0, src_offset: int = 0, count: int = 0, stream: Stream = None
+    dest: warp.array,
+    src: warp.array,
+    dest_offset: int = 0,
+    src_offset: int = 0,
+    count: int = 0,
+    stream: Optional[Stream] = None,
 ):
     """Copy array contents from `src` to `dest`.
 
     Args:
-        dest: Destination array, must be at least as big as source buffer
+        dest: Destination array, must be at least as large as source buffer
         src: Source array
         dest_offset: Element offset in the destination array
         src_offset: Element offset in the source array
         count: Number of array elements to copy (will copy all elements if set to 0)
-        stream: The stream on which to perform the copy (optional)
+        stream: The stream on which to perform the copy
 
     The stream, if specified, can be from any device.  If the stream is omitted, then Warp selects a stream based on the following rules:
     (1) If the destination array is on a CUDA device, use the current stream on the destination device.
     (2) Otherwise, if the source array is on a CUDA device, use the current stream on the source device.
 
     If neither source nor destination are on a CUDA device, no stream is used for the copy.
-
     """
 
     from warp.context import runtime
@@ -6194,8 +6391,8 @@ def type_str(t):
             return f"Transformation[{type_str(t._wp_scalar_type_)}]"
 
         raise TypeError("Invalid vector or matrix dimensions")
-    elif warp.codegen.get_type_origin(t) in (list, tuple):
-        args_repr = ", ".join(type_str(x) for x in warp.codegen.get_type_args(t))
+    elif get_origin(t) in (list, tuple):
+        args_repr = ", ".join(type_str(x) for x in get_args(t))
         return f"{t._name}[{args_repr}]"
     elif t is Ellipsis:
         return "..."

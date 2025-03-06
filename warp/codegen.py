@@ -18,7 +18,7 @@ import re
 import sys
 import textwrap
 import types
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, get_args, get_origin
 
 import warp.config
 from warp.types import *
@@ -49,7 +49,7 @@ class WarpCodegenKeyError(KeyError):
 
 
 # map operator to function name
-builtin_operators = {}
+builtin_operators: Dict[type[ast.AST], str] = {}
 
 # see https://www.ics.uci.edu/~pattis/ICS-31/lectures/opexp.pdf for a
 # nice overview of python operators
@@ -112,16 +112,6 @@ def get_closure_cell_contents(obj):
         pass
 
     return None
-
-
-def get_type_origin(tp):
-    # Compatible version of `typing.get_origin()` for Python 3.7 and older.
-    return getattr(tp, "__origin__", None)
-
-
-def get_type_args(tp):
-    # Compatible version of `typing.get_args()` for Python 3.7 and older.
-    return getattr(tp, "__args__", ())
 
 
 def eval_annotations(annotations: Mapping[str, Any], obj: Any) -> Mapping[str, Any]:
@@ -407,12 +397,14 @@ class StructInstance:
 
 
 class Struct:
-    def __init__(self, cls, key, module):
+    hash: bytes
+
+    def __init__(self, cls: type, key: str, module: warp.context.Module):
         self.cls = cls
         self.module = module
         self.key = key
+        self.vars: Dict[str, Var] = {}
 
-        self.vars = {}
         annotations = get_annotations(self.cls)
         for label, type in annotations.items():
             self.vars[label] = Var(label, type)
@@ -583,11 +575,11 @@ class Reference:
         self.value_type = value_type
 
 
-def is_reference(type):
+def is_reference(type: Any) -> builtins.bool:
     return isinstance(type, Reference)
 
 
-def strip_reference(arg):
+def strip_reference(arg: Any) -> Any:
     if is_reference(arg):
         return arg.value_type
     else:
@@ -615,7 +607,14 @@ def compute_type_str(base_name, template_params):
 
 
 class Var:
-    def __init__(self, label, type, requires_grad=False, constant=None, prefix=True):
+    def __init__(
+        self,
+        label: str,
+        type: type,
+        requires_grad: builtins.bool = False,
+        constant: Optional[builtins.bool] = None,
+        prefix: builtins.bool = True,
+    ):
         # convert built-in types to wp types
         if type == float:
             type = float32
@@ -642,7 +641,7 @@ class Var:
         return self.label
 
     @staticmethod
-    def type_to_ctype(t, value_type=False):
+    def type_to_ctype(t: type, value_type: builtins.bool = False) -> str:
         if is_array(t):
             if hasattr(t.dtype, "_wp_generic_type_str_"):
                 dtypestr = compute_type_str(f"wp::{t.dtype._wp_generic_type_str_}", t.dtype._wp_type_params_)
@@ -673,7 +672,7 @@ class Var:
         else:
             return f"wp::{t.__name__}"
 
-    def ctype(self, value_type=False):
+    def ctype(self, value_type: builtins.bool = False) -> str:
         return Var.type_to_ctype(self.type, value_type)
 
     def emit(self, prefix: str = "var"):
@@ -795,7 +794,7 @@ def func_match_args(func, arg_types, kwarg_types):
     return True
 
 
-def get_arg_type(arg: Union[Var, Any]):
+def get_arg_type(arg: Union[Var, Any]) -> type:
     if isinstance(arg, str):
         return str
 
@@ -811,7 +810,7 @@ def get_arg_type(arg: Union[Var, Any]):
     return type(arg)
 
 
-def get_arg_value(arg: Union[Var, Any]):
+def get_arg_value(arg: Any) -> Any:
     if isinstance(arg, Sequence):
         return tuple(get_arg_value(x) for x in arg)
 
@@ -932,9 +931,6 @@ class Adjoint:
         # so we only avoid rebuilding kernels that errored out to give a chance
         # for unit testing errors being spit out from kernels.
         adj.skip_build = False
-
-        # Collect the LTOIR required at link-time
-        adj.ltoirs = []
 
     # allocate extra space for a function call that requires its
     # own shared memory space, we treat shared memory as a stack
@@ -1273,7 +1269,7 @@ class Adjoint:
 
         # Bind the positional and keyword arguments to the function's signature
         # in order to process them as Python does it.
-        bound_args = func.signature.bind(*args, **kwargs)
+        bound_args: inspect.BoundArguments = func.signature.bind(*args, **kwargs)
 
         # Type args are the “compile time” argument values we get from codegen.
         # For example, when calling `wp.vec3f(...)` from within a kernel,
@@ -1848,25 +1844,6 @@ class Adjoint:
                 ) from e
             raise WarpCodegenAttributeError(f"Error, `{node.attr}` is not an attribute of '{aggregate}'") from e
 
-    def emit_String(adj, node):
-        # string constant
-        return adj.add_constant(node.s)
-
-    def emit_Num(adj, node):
-        # lookup constant, if it has already been assigned then return existing var
-        key = (node.n, type(node.n))
-
-        if key in adj.symbols:
-            return adj.symbols[key]
-        else:
-            out = adj.add_constant(node.n)
-            adj.symbols[key] = out
-            return out
-
-    def emit_Ellipsis(adj, node):
-        # stubbed @wp.native_func
-        return
-
     def emit_Assert(adj, node):
         # eval condition
         cond = adj.eval(node.test)
@@ -1878,24 +1855,11 @@ class Adjoint:
 
         adj.add_forward(f'assert(("{escaped_segment}",{cond.emit()}));')
 
-    def emit_NameConstant(adj, node):
-        if node.value:
-            return adj.add_constant(node.value)
-        elif node.value is None:
+    def emit_Constant(adj, node):
+        if node.value is None:
             raise WarpCodegenTypeError("None type unsupported")
         else:
-            return adj.add_constant(False)
-
-    def emit_Constant(adj, node):
-        if isinstance(node, ast.Str):
-            return adj.emit_String(node)
-        elif isinstance(node, ast.Num):
-            return adj.emit_Num(node)
-        elif isinstance(node, ast.Ellipsis):
-            return adj.emit_Ellipsis(node)
-        else:
-            assert isinstance(node, ast.NameConstant) or isinstance(node, ast.Constant)
-            return adj.emit_NameConstant(node)
+            return adj.add_constant(node.value)
 
     def emit_BinOp(adj, node):
         # evaluate binary operator arguments
@@ -1989,10 +1953,11 @@ class Adjoint:
         adj.end_while()
 
     def eval_num(adj, a):
-        if isinstance(a, ast.Num):
-            return True, a.n
-        if isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Num):
-            return True, -a.operand.n
+        if isinstance(a, ast.Constant):
+            return True, a.value
+        if isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Constant):
+            # Negative constant
+            return True, -a.operand.value
 
         # try and resolve the expression to an object
         # e.g.: wp.constant in the globals scope
@@ -2278,15 +2243,22 @@ class Adjoint:
         out = adj.add_call(func, args, kwargs, type_args, min_outputs=min_outputs)
 
         if warp.config.verify_autograd_array_access:
+            # Extract the types and values passed as arguments to the function call.
+            arg_types = tuple(strip_reference(get_arg_type(x)) for x in args)
+            kwarg_types = {k: strip_reference(get_arg_type(v)) for k, v in kwargs.items()}
+
+            # Resolve the exact function signature among any existing overload.
+            resolved_func = adj.resolve_func(func, arg_types, kwarg_types, min_outputs)
+
             # update arg read/write states according to what happens to that arg in the called function
-            if hasattr(func, "adj"):
+            if hasattr(resolved_func, "adj"):
                 for i, arg in enumerate(args):
-                    if func.adj.args[i].is_write:
+                    if resolved_func.adj.args[i].is_write:
                         kernel_name = adj.fun_name
                         filename = adj.filename
                         lineno = adj.lineno + adj.fun_lineno
                         arg.mark_write(kernel_name=kernel_name, filename=filename, lineno=lineno)
-                    if func.adj.args[i].is_read:
+                    if resolved_func.adj.args[i].is_read:
                         arg.mark_read()
 
         return out
@@ -2717,9 +2689,6 @@ class Adjoint:
         ast.BoolOp: emit_BoolOp,
         ast.Name: emit_Name,
         ast.Attribute: emit_Attribute,
-        ast.Str: emit_String,  # Deprecated in 3.8; use Constant
-        ast.Num: emit_Num,  # Deprecated in 3.8; use Constant
-        ast.NameConstant: emit_NameConstant,  # Deprecated in 3.8; use Constant
         ast.Constant: emit_Constant,
         ast.BinOp: emit_BinOp,
         ast.UnaryOp: emit_UnaryOp,
@@ -2729,14 +2698,13 @@ class Adjoint:
         ast.Continue: emit_Continue,
         ast.Expr: emit_Expr,
         ast.Call: emit_Call,
-        ast.Index: emit_Index,  # Deprecated in 3.8; Use the index value directly instead.
+        ast.Index: emit_Index,  # Deprecated in 3.9
         ast.Subscript: emit_Subscript,
         ast.Assign: emit_Assign,
         ast.Return: emit_Return,
         ast.AugAssign: emit_AugAssign,
         ast.Tuple: emit_Tuple,
         ast.Pass: emit_Pass,
-        ast.Ellipsis: emit_Ellipsis,
         ast.Assert: emit_Assert,
     }
 
@@ -2932,12 +2900,16 @@ class Adjoint:
 
             # We want to replace the expression code in-place,
             # so reparse it to get the correct column info.
-            len_value_locs = []
+            len_value_locs: List[Tuple[int, int, int]] = []
             expr_tree = ast.parse(static_code)
             assert len(expr_tree.body) == 1 and isinstance(expr_tree.body[0], ast.Expr)
             expr_root = expr_tree.body[0].value
             for expr_node in ast.walk(expr_root):
-                if isinstance(expr_node, ast.Call) and expr_node.func.id == "len" and len(expr_node.args) == 1:
+                if (
+                    isinstance(expr_node, ast.Call)
+                    and getattr(expr_node.func, "id", None) == "len"
+                    and len(expr_node.args) == 1
+                ):
                     len_expr = static_code[expr_node.col_offset : expr_node.end_col_offset]
                     try:
                         len_value = eval(len_expr, len_expr_ctx)
@@ -3095,9 +3067,9 @@ class Adjoint:
 
         local_variables = set()  # Track local variables appearing on the LHS so we know when variables are shadowed
 
-        constants = {}
-        types = {}
-        functions = {}
+        constants: Dict[str, Any] = {}
+        types: Dict[Union[Struct, type], Any] = {}
+        functions: Dict[warp.context.Function, Any] = {}
 
         for node in ast.walk(adj.tree):
             if isinstance(node, ast.Name) and node.id not in local_variables:
@@ -3140,7 +3112,7 @@ class Adjoint:
 # code generation
 
 cpu_module_header = """
-#define WP_TILE_BLOCK_DIM {tile_size}
+#define WP_TILE_BLOCK_DIM {block_dim}
 #define WP_NO_CRT
 #include "builtin.h"
 
@@ -3159,7 +3131,7 @@ cpu_module_header = """
 """
 
 cuda_module_header = """
-#define WP_TILE_BLOCK_DIM {tile_size}
+#define WP_TILE_BLOCK_DIM {block_dim}
 #define WP_NO_CRT
 #include "builtin.h"
 
@@ -3302,8 +3274,15 @@ WP_API void {name}_cpu_forward(
 {{
     for (size_t task_index = 0; task_index < dim.size; ++task_index)
     {{
+        // init shared memory allocator
+        wp::tile_alloc_shared(0, true);
+
         {name}_cpu_kernel_forward(
             {forward_params});
+
+        // check shared memory allocator
+        wp::tile_alloc_shared(0, false, true);
+
     }}
 }}
 
@@ -3320,8 +3299,14 @@ WP_API void {name}_cpu_backward(
 {{
     for (size_t task_index = 0; task_index < dim.size; ++task_index)
     {{
+        // initialize shared memory allocator
+        wp::tile_alloc_shared(0, true);
+
         {name}_cpu_kernel_backward(
             {reverse_params});
+
+        // check shared memory allocator
+        wp::tile_alloc_shared(0, false, true);
     }}
 }}
 
@@ -3403,7 +3388,7 @@ def indent(args, stops=1):
 
 
 # generates a C function name based on the python function name
-def make_full_qualified_name(func):
+def make_full_qualified_name(func: Union[str, Callable]) -> str:
     if not isinstance(func, str):
         func = func.__qualname__
     return re.sub("[^0-9a-zA-Z_]+", "", func.replace(".", "__"))
@@ -3580,11 +3565,11 @@ def codegen_func(adj, c_func_name: str, device="cpu", options=None):
         options = {}
 
     if adj.return_var is not None and "return" in adj.arg_types:
-        if get_type_origin(adj.arg_types["return"]) is tuple:
-            if len(get_type_args(adj.arg_types["return"])) != len(adj.return_var):
+        if get_origin(adj.arg_types["return"]) is tuple:
+            if len(get_args(adj.arg_types["return"])) != len(adj.return_var):
                 raise WarpCodegenError(
                     f"The function `{adj.fun_name}` has its return type "
-                    f"annotated as a tuple of {len(get_type_args(adj.arg_types['return']))} elements "
+                    f"annotated as a tuple of {len(get_args(adj.arg_types['return']))} elements "
                     f"but the code returns {len(adj.return_var)} values."
                 )
             elif not types_equal(adj.arg_types["return"], tuple(x.type for x in adj.return_var)):
@@ -3593,7 +3578,7 @@ def codegen_func(adj, c_func_name: str, device="cpu", options=None):
                     f"annotated as `{warp.context.type_str(adj.arg_types['return'])}` "
                     f"but the code returns a tuple with types `({', '.join(warp.context.type_str(x.type) for x in adj.return_var)})`."
                 )
-        elif len(adj.return_var) > 1 and get_type_origin(adj.arg_types["return"]) is not tuple:
+        elif len(adj.return_var) > 1 and get_origin(adj.arg_types["return"]) is not tuple:
             raise WarpCodegenError(
                 f"The function `{adj.fun_name}` has its return type "
                 f"annotated as `{warp.context.type_str(adj.arg_types['return'])}` "

@@ -6,10 +6,9 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 import builtins
 import functools
-import tempfile
-from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+import warp.build
 from warp.codegen import Reference, Var, strip_reference
 from warp.types import *
 
@@ -32,7 +31,7 @@ def sametypes(arg_types: Mapping[str, Any]):
     return all(types_equal(arg_type_0, t) for t in arg_types_iter)
 
 
-def sametypes_create_value_func(default):
+def sametypes_create_value_func(default: TypeVar):
     def fn(arg_types, arg_values):
         if arg_types is None:
             return default
@@ -390,7 +389,7 @@ add_builtin(
 )
 
 
-def scalar_infer_type(arg_types: Mapping[str, type]):
+def scalar_infer_type(arg_types: Union[Mapping[str, type], Tuple[type, ...], None]):
     if arg_types is None:
         return Scalar
 
@@ -941,6 +940,12 @@ def matrix_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, An
             raise RuntimeError("the `shape` argument must be specified when initializing a matrix by value")
 
         if all(type_is_vector(x) for x in variadic_arg_types):
+            warp.utils.warn(
+                "the built-in `wp.matrix()` won't support taking column vectors as input "
+                "in the future. Use `wp.matrix_from_rows()` or `wp.matrix_from_cols()` instead.",
+                DeprecationWarning,
+            )
+
             if shape[1] != variadic_arg_count:
                 raise RuntimeError(
                     f"incompatible number of column vectors given ({variadic_arg_count}) "
@@ -1016,6 +1021,86 @@ add_builtin(
     initializer_list_func=matrix_initializer_list_func,
     native_func="mat_t",
     doc="Construct a matrix. If the positional ``arg_types`` are not given, then matrix will be zero-initialized.",
+    group="Vector Math",
+    export=False,
+)
+
+
+def matrix_from_vecs_create_value_func(cols: bool):
+    def fn(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+        if arg_types is None:
+            return matrix(shape=(Any, Any), dtype=Scalar)
+
+        variadic_arg_types = arg_types.get("args", ())
+        variadic_arg_count = len(variadic_arg_types)
+
+        if not all(type_is_vector(x) for x in variadic_arg_types):
+            raise RuntimeError("all arguments are expected to be vectors")
+
+        length = variadic_arg_types[0]._length_
+        if any(x._length_ != length for x in variadic_arg_types):
+            raise RuntimeError("all vectors are expected to have the same length")
+
+        dtype = variadic_arg_types[0]._wp_scalar_type_
+        if any(x._wp_scalar_type_ != dtype for x in variadic_arg_types):
+            raise RuntimeError("all vectors are expected to have the same dtype")
+
+        shape = (length, variadic_arg_count) if cols else (variadic_arg_count, length)
+        return matrix(shape=shape, dtype=dtype)
+
+    return fn
+
+
+def matrix_from_vecs_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    # We're in the codegen stage where we emit the code calling the built-in.
+    # Further validate the given argument values if needed and map them
+    # to the underlying C++ function's runtime and template params.
+
+    shape = return_type._shape_
+    dtype = return_type._wp_scalar_type_
+
+    variadic_args = args.get("args", ())
+
+    func_args = variadic_args
+
+    if shape in ((2, 2), (3, 3), (4, 4)):
+        # Template specializations exist for these shapes, don't pass them
+        # as template parameters.
+        template_args = (dtype,)
+    else:
+        template_args = (*shape, dtype)
+
+    return (func_args, template_args)
+
+
+def matrix_from_vecs_initializer_list_func(args, return_type):
+    shape = return_type._shape_
+
+    return shape[0] != shape[1] or shape[0] > 4
+
+
+add_builtin(
+    "matrix_from_cols",
+    input_types={"*args": vector(length=Any, dtype=Scalar)},
+    variadic=True,
+    value_func=matrix_from_vecs_create_value_func(cols=True),
+    dispatch_func=matrix_from_vecs_dispatch_func,
+    initializer_list_func=matrix_from_vecs_initializer_list_func,
+    native_func="matrix_from_cols",
+    doc="Construct a matrix from column vectors.",
+    group="Vector Math",
+    export=False,
+)
+
+add_builtin(
+    "matrix_from_rows",
+    input_types={"*args": vector(length=Any, dtype=Scalar)},
+    variadic=True,
+    value_func=matrix_from_vecs_create_value_func(cols=False),
+    dispatch_func=matrix_from_vecs_dispatch_func,
+    initializer_list_func=matrix_from_vecs_initializer_list_func,
+    native_func="matrix_from_rows",
+    doc="Construct a matrix from row vectors.",
     group="Vector Math",
     export=False,
 )
@@ -1339,6 +1424,13 @@ add_builtin(
     value_func=lambda arg_types, arg_values: quaternion(dtype=float_infer_type(arg_types)),
     group="Quaternion Math",
     doc="Construct a quaternion from a 3x3 matrix.",
+)
+add_builtin(
+    "quat_from_matrix",
+    input_types={"mat": matrix(shape=(4, 4), dtype=Float)},
+    value_func=lambda arg_types, arg_values: quaternion(dtype=float_infer_type(arg_types)),
+    group="Quaternion Math",
+    doc="Construct a quaternion from a 4x4 matrix.",
 )
 add_builtin(
     "quat_rpy",
@@ -4192,7 +4284,7 @@ add_builtin(
     input_types={"state": uint32},
     value_type=int,
     group="Random",
-    doc="Return a random integer in the range [0, 2^32).",
+    doc="Return a random integer in the range [-2^31, 2^31).",
 )
 add_builtin(
     "randi",
@@ -4200,6 +4292,20 @@ add_builtin(
     value_type=int,
     group="Random",
     doc="Return a random integer between [low, high).",
+)
+add_builtin(
+    "randu",
+    input_types={"state": uint32},
+    value_type=uint32,
+    group="Random",
+    doc="Return a random unsigned integer in the range [0, 2^32).",
+)
+add_builtin(
+    "randu",
+    input_types={"state": uint32, "low": uint32, "high": uint32},
+    value_type=uint32,
+    group="Random",
+    doc="Return a random unsigned integer between [low, high).",
 )
 add_builtin(
     "randf",
@@ -5480,7 +5586,27 @@ add_builtin(
 )
 add_builtin(
     "expect_near",
-    input_types={"a": vec3, "b": vec3, "tolerance": float},
+    input_types={"a": vector(length=Any, dtype=Float), "b": vector(length=Any, dtype=Float), "tolerance": Float},
+    defaults={"tolerance": 1.0e-6},
+    value_type=None,
+    doc="Prints an error to stdout if any element of ``a`` and ``b`` are not closer than tolerance in magnitude",
+    group="Utility",
+)
+add_builtin(
+    "expect_near",
+    input_types={"a": quaternion(dtype=Float), "b": quaternion(dtype=Float), "tolerance": Float},
+    defaults={"tolerance": 1.0e-6},
+    value_type=None,
+    doc="Prints an error to stdout if any element of ``a`` and ``b`` are not closer than tolerance in magnitude",
+    group="Utility",
+)
+add_builtin(
+    "expect_near",
+    input_types={
+        "a": matrix(shape=(Any, Any), dtype=Float),
+        "b": matrix(shape=(Any, Any), dtype=Float),
+        "tolerance": Float,
+    },
     defaults={"tolerance": 1.0e-6},
     value_type=None,
     doc="Prints an error to stdout if any element of ``a`` and ``b`` are not closer than tolerance in magnitude",
@@ -6124,142 +6250,82 @@ def tile_matmul_generic_lto_dispatch_func(
     out.type.storage = "shared"
     template_args = [accumulate]
 
-    # Maps Python/Warp types to C++ types and enums
-    def cublasdx_type_map(dtype):
-        if dtype == float16:
-            return ("wp::float16", 3, 0)
-        if dtype == float32:
-            return ("wp::float32", 5, 0)
-        if dtype == float64:
-            return ("wp::float64", 6, 0)
-        if dtype == vec2h:
-            return ("wp::vec2h", 3, 1)
-        if dtype == vec2f:
-            return ("wp::vec2f", 5, 1)
-        if dtype == vec2d:
-            return ("wp::vec2d", 6, 1)
-        raise TypeError("Unsupported input type in tile_matmul")
-
-    def cublasdx_arrangement_map(layout):
-        if layout == "colmajor":
-            return 0  # CUBLASDX_ARRANGEMENT_COL_MAJOR
-        if layout == "rowmajor":
-            return 1  # CUBLASDX_ARRANGEMENT_ROW_MAJOR
-        raise ValueError("Unsupported layout in tile_matmul")
-
-    # generate the LTO
     M, K = a.type.shape[0], a.type.shape[1]
     _, N = b.type.shape[0], b.type.shape[1]
     num_threads = options["block_dim"]
     arch = options["output_arch"]
 
-    def make_function(M, N, K, adtype, bdtype, cdtype, alayout, blayout, clayout):
-        (a_dtype, a_prec, a_type) = cublasdx_type_map(adtype)
-        (b_dtype, b_prec, b_type) = cublasdx_type_map(bdtype)
-        (c_dtype, c_prec, c_type) = cublasdx_type_map(cdtype)
-        a_arrangement = cublasdx_arrangement_map(alayout)
-        b_arrangement = cublasdx_arrangement_map(blayout)
-        c_arrangement = cublasdx_arrangement_map(clayout)
+    if arch is None:
+        # CPU dispatch
+        return ((0, 0, 0, a, b, out), template_args, [], 0)
+    else:
 
-        if a_type != b_type or a_type != c_type:
-            raise TypeError("time_matmul(A, B, C) requires all inputs to be real or complex")
+        def tile_flip_layout(layout):
+            if layout == "rowmajor":
+                return "colmajor"
+            elif layout == "colmajor":
+                return "rowmajor"
 
-        element_type = a_type
-
-        lto_symbol = f"dot_{M}_{N}_{K}_{arch}_{num_threads}_{a_arrangement}_{b_arrangement}_{c_arrangement}_{a_prec}_{b_prec}_{c_prec}_{element_type}"
-
-        # early out if LTO for this combination already exists for this module
-        if lto_symbol in builder.ltoirs:
-            return lto_symbol, builder.ltoirs[lto_symbol]
-
-        # otherwise compile LTO
-        lto_code = tempfile.NamedTemporaryFile(prefix="warp", delete=False)
-        result = warp.context.runtime.core.cuda_compile_dot(
-            lto_code.name.encode("utf-8"),
-            lto_symbol.encode("utf-8"),
-            0,
-            None,
-            None,
-            arch,
+        # generate the LTOs
+        #    C += A * B
+        (fun_forward, lto_forward) = warp.build.build_lto_dot(
             M,
             N,
             K,
-            a_prec,
-            b_prec,
-            c_prec,
-            element_type,
-            a_arrangement,
-            b_arrangement,
-            c_arrangement,
+            a.type.dtype,
+            b.type.dtype,
+            out.type.dtype,
+            a.type.layout,
+            b.type.layout,
+            out.type.layout,
+            arch,
             num_threads,
+            builder,
         )
-        lto_code_path = Path(lto_code.name)
-        if not result:
-            lto_code.close()
-            if lto_code_path.exists():
-                lto_code_path.unlink()
-            raise RuntimeError("Failed to compile tile_matmul")
-        else:
-            with open(lto_code.name, "rb") as f:
-                lto_code_data = f.read()
-            lto_code.close()
-            lto_code_path.unlink()
+        # adjA += adjC * B^T - Transpose ~= flipped layout
+        (fun_backward_A, lto_backward_A) = warp.build.build_lto_dot(
+            M,
+            K,
+            N,
+            out.type.dtype,
+            b.type.dtype,
+            a.type.dtype,
+            out.type.layout,
+            tile_flip_layout(b.type.layout),
+            a.type.layout,
+            arch,
+            num_threads,
+            builder,
+        )
+        # adjB += A^T * adjC - Transpose ~= flipped layout
+        (fun_backward_B, lto_backward_B) = warp.build.build_lto_dot(
+            K,
+            N,
+            M,
+            a.type.dtype,
+            out.type.dtype,
+            b.type.dtype,
+            tile_flip_layout(a.type.layout),
+            out.type.layout,
+            b.type.layout,
+            arch,
+            num_threads,
+            builder,
+        )
 
-            builder.ltoirs[lto_symbol] = lto_code_data
-            builder.ltoirs_decl[lto_symbol] = (
-                f"void {lto_symbol}({c_dtype}, {a_dtype}*, {b_dtype}*, {c_dtype}, {c_dtype}*);"
-            )
-
-            return lto_symbol, lto_code_data
-
-    def tile_flip_layout(layout):
-        if layout == "rowmajor":
-            return "colmajor"
-        elif layout == "colmajor":
-            return "rowmajor"
-
-    #    C += A * B
-    (fun_forward, lto_forward) = make_function(
-        M, N, K, a.type.dtype, b.type.dtype, out.type.dtype, a.type.layout, b.type.layout, out.type.layout
-    )
-    # adjA += adjC * B^T - Transpose ~= flipped layout
-    (fun_backward_A, lto_backward_A) = make_function(
-        M,
-        K,
-        N,
-        out.type.dtype,
-        b.type.dtype,
-        a.type.dtype,
-        out.type.layout,
-        tile_flip_layout(b.type.layout),
-        a.type.layout,
-    )
-    # adjB += A^T * adjC - Transpose ~= flipped layout
-    (fun_backward_B, lto_backward_B) = make_function(
-        K,
-        N,
-        M,
-        a.type.dtype,
-        out.type.dtype,
-        b.type.dtype,
-        tile_flip_layout(a.type.layout),
-        out.type.layout,
-        b.type.layout,
-    )
-
-    return (
-        (
-            Var(fun_forward, str, False, True, False),
-            Var(fun_backward_A, str, False, True, False),
-            Var(fun_backward_B, str, False, True, False),
-            a,
-            b,
-            out,
-        ),
-        template_args,
-        [lto_forward, lto_backward_A, lto_backward_B],
-        0,
-    )
+        return (
+            (
+                Var(fun_forward, str, False, True, False),
+                Var(fun_backward_A, str, False, True, False),
+                Var(fun_backward_B, str, False, True, False),
+                a,
+                b,
+                out,
+            ),
+            template_args,
+            [lto_forward, lto_backward_A, lto_backward_B],
+            0,
+        )
 
 
 add_builtin(
@@ -6373,59 +6439,29 @@ def tile_fft_generic_lto_dispatch_func(
     num_threads = options["block_dim"]
     arch = options["output_arch"]
     ept = size // num_threads
-    lto_symbol = f"fft_{size}_{ept}_{arch}_{direction}_{precision}"
 
-    # early out if LTO for this combination already exists for this module
-    if lto_symbol in builder.ltoirs:
-        return lto_symbol, builder.ltoirs[lto_symbol]
+    if arch is None:
+        # CPU dispatch (nop)
+        return ([], [], [], 0)
+    else:
+        # generate the LTO
+        lto_symbol, lto_code_data, shared_memory_bytes = warp.build.build_lto_fft(
+            arch, size, ept, direction, dir, precision, builder
+        )
 
-    # otherwise compile LTO
-    lto_code = tempfile.NamedTemporaryFile(prefix="warp", delete=False)
-    shared_memory_size = ctypes.c_int(0)
-
-    result = warp.context.runtime.core.cuda_compile_fft(
-        lto_code.name.encode("utf-8"),
-        lto_symbol.encode("utf-8"),
-        0,
-        None,
-        None,
-        arch,
-        size,
-        ept,
-        dir,
-        precision,
-        ctypes.byref(shared_memory_size),
-    )
-    lto_code_path = Path(lto_code.name)
-    if not result:
-        lto_code.close()
-        if lto_code_path.exists():
-            lto_code_path.unlink()
-        raise RuntimeError("Failed to compile tile_fft")
-
-    with open(lto_code.name, "rb") as f:
-        lto_code_data = f.read()
-
-    lto_code.close()
-    lto_code_path.unlink()
-
-    builder.ltoirs[lto_symbol] = lto_code_data
-
-    shared_memory_bytes = Tile.round_up(shared_memory_size.value)
-
-    return (
-        (
-            Var(lto_symbol, str, False, True, False),
-            Var(dtype, str, False, True, False),
-            Var(str(shared_memory_bytes), str, False, True, False),
-            Var(str(batch), str, False, True, False),
-            Var(str(ept), str, False, True, False),
-            inout,
-        ),
-        [],
-        [lto_code_data],
-        shared_memory_bytes,
-    )
+        return (
+            (
+                Var(lto_symbol, str, False, True, False),
+                Var(dtype, str, False, True, False),
+                Var(str(shared_memory_bytes), str, False, True, False),
+                Var(str(batch), str, False, True, False),
+                Var(str(ept), str, False, True, False),
+                inout,
+            ),
+            [],
+            [lto_code_data],
+            shared_memory_bytes,
+        )
 
 
 add_builtin(
@@ -6528,57 +6564,36 @@ def tile_cholesky_generic_lto_dispatch_func(
     if out.type.shape[0] != M or out.type.shape[1] != M:
         raise ValueError("tile_cholesky() output tile must be square")
 
-    num_threads = options["block_dim"]
-    arch = options["output_arch"]
-    lto_symbol = f"potrf_{M}_{N}_{arch}_{precision_enum}"
+    solver = "potrf"
+    solver_enum = cusolver_function_map[solver]
 
-    # early out if LTO for this combination already exists for this module
-    if lto_symbol in builder.ltoirs:
-        return lto_symbol, builder.ltoirs[lto_symbol]
-
-    # otherwise compile LTO
-    lto_code = tempfile.NamedTemporaryFile(prefix="warp", delete=False)
-    universal_fatbin_code = tempfile.NamedTemporaryFile(prefix="warp", delete=False)
-
-    # cuSOLVERDx only support col-major input/outputs,
+    # cuSOLVERDx only supports col-major input/outputs,
     # so we use upper to mimic a row-major input
-    result = warp.context.runtime.core.cuda_compile_solver(
-        universal_fatbin_code.name.encode("utf-8"),
-        lto_code.name.encode("utf-8"),
-        lto_symbol.encode("utf-8"),
-        0,
-        None,
-        None,
-        arch,
-        M,
-        N,
-        cusolver_function_map["potrf"],
-        precision_enum,
-        cusolver_fill_mode_map["upper"],
-        num_threads,
-    )
+    fill_mode = cusolver_fill_mode_map["upper"]
 
-    if not result:
-        for f in [lto_code, universal_fatbin_code]:
-            f.close()
-            if Path(f.name).exists():
-                Path(f.name).unlink()
-        raise RuntimeError("Failed to compile tile_cholesky")
+    arch = options["output_arch"]
+    num_threads = options["block_dim"]
+    parameter_list = f"({dtype}*, unsigned)"
 
+    if arch is None:
+        # CPU dispatch
+        return ((0, a, out), [], [], 0)
     else:
-        with open(lto_code.name, "rb") as f:
-            lto_code_data = f.read()
-        with open(universal_fatbin_code.name, "rb") as f:
-            universal_fatbin_code_data = f.read()
-        for f in [lto_code, universal_fatbin_code]:
-            f.close()
-            Path(f.name).unlink()
+        # generate the LTO
+        lto_symbol, lto_code_data = warp.build.build_lto_solver(
+            M,
+            N,
+            solver,
+            solver_enum,
+            fill_mode,
+            arch,
+            precision_enum,
+            num_threads,
+            parameter_list,
+            builder,
+        )
 
-    builder.ltoirs[lto_symbol] = lto_code_data
-    builder.ltoirs_decl[lto_symbol] = f"void {lto_symbol}({dtype}*, unsigned);"
-    builder.fatbins["cholesky"] = universal_fatbin_code_data
-
-    return ((Var(lto_symbol, str, False, True, False), a, out), [], [lto_code_data], 0)
+        return ((Var(lto_symbol, str, False, True, False), a, out), [], [lto_code_data], 0)
 
 
 add_builtin(
@@ -6672,57 +6687,36 @@ def tile_cholesky_solve_generic_lto_dispatch_func(
             f"got {y.type.shape[0]} elements in output and {M} rows in 'L'"
         )
 
-    num_threads = options["block_dim"]
-    arch = options["output_arch"]
-    lto_symbol = f"potrs_{M}_{N}_{arch}_{precision_enum}"
+    solver = "potrs"
+    solver_enum = cusolver_function_map[solver]
 
-    # early out if LTO for this combination already exists for this module
-    if lto_symbol in builder.ltoirs:
-        return lto_symbol, builder.ltoirs[lto_symbol]
-
-    # otherwise compile LTO
-    lto_code = tempfile.NamedTemporaryFile(prefix="warp", delete=False)
-    universal_fatbin_code = tempfile.NamedTemporaryFile(prefix="warp", delete=False)
-
-    # cuSOLVERDx only support col-major input/outputs,
+    # cuSOLVERDx only supports col-major input/outputs,
     # so we use upper to mimic a row-major input
-    result = warp.context.runtime.core.cuda_compile_solver(
-        universal_fatbin_code.name.encode("utf-8"),
-        lto_code.name.encode("utf-8"),
-        lto_symbol.encode("utf-8"),
-        0,
-        None,
-        None,
-        arch,
-        M,
-        N,
-        cusolver_function_map["potrs"],
-        precision_enum,
-        cusolver_fill_mode_map["upper"],
-        num_threads,
-    )
+    fill_mode = cusolver_fill_mode_map["upper"]
 
-    if not result:
-        for f in [lto_code, universal_fatbin_code]:
-            f.close()
-            if Path(f.name).exists():
-                Path(f.name).unlink()
-        raise RuntimeError("Failed to compile tile_cholesky_solve")
+    arch = options["output_arch"]
+    num_threads = options["block_dim"]
+    parameter_list = f"({dtype}*, {dtype}*)"
 
+    if arch is None:
+        # CPU dispatch
+        return ((0, L, x, y), [], [], 0)
     else:
-        with open(lto_code.name, "rb") as f:
-            lto_code_data = f.read()
-        with open(universal_fatbin_code.name, "rb") as f:
-            universal_fatbin_code_data = f.read()
-        for f in [lto_code, universal_fatbin_code]:
-            f.close()
-            Path(f.name).unlink()
+        # generate the LTO
+        lto_symbol, lto_code_data = warp.build.build_lto_solver(
+            M,
+            N,
+            solver,
+            solver_enum,
+            fill_mode,
+            arch,
+            precision_enum,
+            num_threads,
+            parameter_list,
+            builder,
+        )
 
-    builder.ltoirs[lto_symbol] = lto_code_data
-    builder.ltoirs_decl[lto_symbol] = f"void {lto_symbol}({dtype}*, {dtype}*);"
-    builder.fatbins["cholesky"] = universal_fatbin_code_data
-
-    return ((Var(lto_symbol, str, False, True, False), L, x, y), [], [lto_code_data], 0)
+        return ((Var(lto_symbol, str, False, True, False), L, x, y), [], [lto_code_data], 0)
 
 
 add_builtin(

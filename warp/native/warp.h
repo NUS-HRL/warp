@@ -156,6 +156,15 @@ extern "C"
     WP_API void radix_sort_pairs_float_host(uint64_t keys, uint64_t values, int n);
     WP_API void radix_sort_pairs_float_device(uint64_t keys, uint64_t values, int n);
 
+    WP_API void radix_sort_pairs_int64_host(uint64_t keys, uint64_t values, int n);
+    WP_API void radix_sort_pairs_int64_device(uint64_t keys, uint64_t values, int n);
+
+    WP_API void segmented_sort_pairs_float_host(uint64_t keys, uint64_t values, int n, uint64_t segment_start_indices, uint64_t segment_end_indices, int num_segments);
+    WP_API void segmented_sort_pairs_float_device(uint64_t keys, uint64_t values, int n, uint64_t segment_start_indices, uint64_t segment_end_indices, int num_segments);
+
+    WP_API void segmented_sort_pairs_int_host(uint64_t keys, uint64_t values, int n, uint64_t segment_start_indices, uint64_t segment_end_indices, int num_segments);
+    WP_API void segmented_sort_pairs_int_device(uint64_t keys, uint64_t values, int n, uint64_t segment_start_indices, uint64_t segment_end_indices, int num_segments);
+
     WP_API void runlength_encode_int_host(uint64_t values, uint64_t run_values, uint64_t run_lengths, uint64_t run_count, int n);
     WP_API void runlength_encode_int_device(uint64_t values, uint64_t run_values, uint64_t run_lengths, uint64_t run_count, int n);
 
@@ -319,7 +328,7 @@ extern "C"
 
     WP_API void* cuda_event_create(void* context, unsigned flags);
     WP_API void cuda_event_destroy(void* event);
-    WP_API void cuda_event_record(void* event, void* stream);
+    WP_API void cuda_event_record(void* event, void* stream, bool timing=false);
     WP_API void cuda_event_synchronize(void* event);
     WP_API float cuda_event_elapsed_time(void* start_event, void* end_event);
 

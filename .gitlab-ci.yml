@@ -222,11 +222,10 @@ linux-aarch64 test:
   extends:
     - .omni_devplat_arm_docker_gpu
     - .test_common_main
-  allow_failure: true # Unsure of stability and availability of devplat ARM GPU runners
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-aarch64]
-    - python -m pip install coverage[toml]
+    - python -m pip install -U "coverage[toml]"
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
@@ -235,21 +234,20 @@ linux-aarch64 test jetson:
   image: ubuntu:22.04
   needs: [linux-aarch64 build]
   extends:
-    - .test_common_main
+    - .save_test_report_artifact
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH 
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH =~ /^release-.*/
     - when: manual # If not auto-triggered, allow any pipeline to run this job manually
-  allow_failure: true # Unsure of stability of Jetson runner for now
+      allow_failure: true
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-aarch64]
-    - python -m pip install coverage[toml]
-    - python -m pip install -U "jax[cuda12]"
+    - python -m pip install -U "jax[cuda12]" 
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
-    - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    - python -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
   tags:
     - gpu/orin
 
@@ -269,7 +267,7 @@ linux-x86_64 test:
     - $PYTHON -m venv _venv
     - source _venv/bin/activate
     - python -m pip install --upgrade pip
-    - python -m pip install --upgrade usd-core coverage[toml] blosc
+    - python -m pip install --upgrade usd-core coverage[toml] blosc Pillow
     - python -m pip install --upgrade torch --extra-index-url https://download.pytorch.org/whl/cu121
     - python -m pip install -U "jax[cuda12]"
     - python -m pip install -e .
@@ -278,6 +276,11 @@ linux-x86_64 test:
     - export WARP_DISABLE_P2P_TESTS=1
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    # Upload report to Codecov
+    - git config --global --add safe.directory $CI_PROJECT_DIR
+    - python -m pip install codecov-cli
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --plugin pycoverage -F unittests -f coverage.xml
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --report-type test_results -f rspec.xml
 
 # Note that for throughput reasons this runs on a single-GPU runner
 windows-x86_64 test:
@@ -295,12 +298,18 @@ windows-x86_64 test:
     - '& $env:CI_PROJECT_DIR\_build\target-deps\python\python.exe -m venv _venv'
     - .\_venv\Scripts\Activate.ps1
     - python -m pip install --upgrade pip
-    - python -m pip install --upgrade usd-core coverage[toml] numpy blosc
+    - python -m pip install --upgrade usd-core coverage[toml] numpy blosc Pillow
     - python -m pip install --upgrade torch --extra-index-url https://download.pytorch.org/whl/cu121
     - python -m pip install -e .
     - Write-Output "$([char]27)[0Ksection_end:$(GetTime):install_dependencies$([char]13)$([char]27)[0K"
   script:
     - python -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
+    # Upload report to Codecov
+    - git config --global --add safe.directory $env:CI_PROJECT_DIR
+    - python -m pip install codecov-cli
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --plugin pycoverage -F unittests -f coverage.xml
+    - codecovcli --verbose upload-process --git-service github --disable-search -t $CODECOV_TOKEN -r NVIDIA/warp --report-type test_results -f rspec.xml
+
 
 mac-x86_64 test:
   stage: test
@@ -312,7 +321,7 @@ mac-x86_64 test:
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - !reference [.snippets, install-python+warp-macos]
-    - python -m pip install --upgrade usd-core coverage[toml]
+    - python -m pip install --upgrade usd-core coverage[toml] Pillow
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - python -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
@@ -368,6 +377,7 @@ windows-x86_64 test mgpu:
     - if: $CI_COMMIT_TAG
     - when: manual # Can be triggered in all other scenarios
       allow_failure: true
+  allow_failure: true # GitLab runners are too unstable to run this job
   before_script:
     - !reference [.snippets, define-powershell-GetTime]
     - Write-Output "$([char]27)[0Ksection_start:$(GetTime):install_dependencies[collapsed=true]$([char]13)$([char]27)[0KInstalling dependencies"
@@ -377,7 +387,7 @@ windows-x86_64 test mgpu:
     - '& $env:CI_PROJECT_DIR\_build\target-deps\python\python.exe -m venv _venv'
     - .\_venv\Scripts\Activate.ps1
     - python -m pip install --upgrade pip
-    - python -m pip install --upgrade usd-core numpy
+    - python -m pip install --upgrade usd-core numpy Pillow
     - python -m pip install --upgrade torch --extra-index-url https://download.pytorch.org/whl/cu121
     - python -m pip install -e .
     - Write-Output "$([char]27)[0Ksection_end:$(GetTime):install_dependencies$([char]13)$([char]27)[0K"
@@ -504,17 +514,19 @@ linux-x86_64 asv:
     - source _venv/bin/activate
     - python -m pip install --upgrade pip
     - python -m pip install asv
-    - export GIT_LFS_SKIP_SMUDGE=1
-    - git config --global --add safe.directory '*' 
-    - git fetch origin main
-    # Make sure the main branch can be checked out by asv
-    - git checkout -f main
+    - GIT_LFS_SKIP_SMUDGE=1
+    # Make sure the comparison ref can be checked out by asv
+    - COMPARE_REF="${CI_MERGE_REQUEST_TARGET_BRANCH_SHA:-${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}}"
+    - 'echo "COMPARE_REF value: ${COMPARE_REF}"' 
+    - git config --global --add safe.directory $CI_PROJECT_DIR
+    - git fetch origin $COMPARE_REF
+    - git checkout -f $COMPARE_REF
     - git checkout -f $CI_COMMIT_SHA
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - cd asv
     - asv machine --yes
-    - asv continuous --interleave-rounds --append-samples --no-only-changed -f 1.15 --bench '^(?!api)' main $CI_COMMIT_SHA
+    - asv continuous --interleave-rounds --append-samples --no-only-changed -f 1.15 --bench '^(?!api)' $COMPARE_REF $CI_COMMIT_SHA
   allow_failure: True # Can make success required after we have tested this job more
 
 # ==============================================================================
@@ -609,6 +621,31 @@ cuda 11 build and test:
   extends:
     - .trigger_common
 
+trigger kit extensions pipeline:
+  stage: test
+  image: busybox
+  extends:
+    - .runner-utility-linux-x86_64
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH =~ /^release-.*/
+    - when: manual # Can be triggered in all other scenarios
+      allow_failure: true
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - echo "Run this job to test the kit extensions."
+
+# Kit Extensions
+kit extensions:
+  stage: child pipelines
+  needs: [trigger kit extensions pipeline]
+  trigger:
+    include: /.gitlab/ci/kit-extensions.yml
+  extends:
+    - .trigger_common
+
 # ==============================================================================
 # Packaging Jobs
 #
@@ -688,6 +725,7 @@ create dev wheels:
     - python3 -m pip install --upgrade pip
     - python3 -m pip install build
   script:
+    - python3 tools/ci/publishing/update_git_hash.py  # Modify config.py with git hash
     - python3 tools/ci/publishing/set_nightly_version.py  # Modify VERSION.md with dev version
     - python3 -m build --wheel -C--build-option=-Pwindows-x86_64
     - python3 -m build --wheel -C--build-option=-Plinux-x86_64
@@ -800,7 +838,7 @@ publish dev wheels to artifactory:
     - cd dist
     - >
       jf rt u --fail-no-op --url=$ARTIFACTORY_BASE_URL --access-token=$ARTIFACTORY_SVC_ACCESS_TOKEN
-      --target-props="component_name=warp-lang;release_approver=ershi;release_status=ready;version=$VERSION;branch=$CI_COMMIT_REF_SLUG"
+      --target-props="component_name=warp-lang;release_approver=ershi;release_status=ready;version=$VERSION;branch=$CI_COMMIT_REF_SLUG;commit=$CI_COMMIT_SHA"
       '*.whl' sw-warp-pypi-local/nightly/warp-lang/
     # Set build-specific properties on individual artifacts
     - >

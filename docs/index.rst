@@ -190,21 +190,12 @@ warp/examples/optim
            :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_spring_cage.py
       - .. image:: ./img/examples/optim_trajectory.png
            :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_trajectory.py
-      - .. image:: ./img/examples/optim_walker.png
-           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_walker.py
+      - .. image:: ./img/examples/optim_softbody_properties.png
+           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_softbody_properties.py
     * - inverse kinematics
       - spring cage
       - trajectory
-      - walker
-    * - .. image:: ./img/examples/optim_softbody_properties.png
-           :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/optim/example_softbody_properties.py
-      -
-      -
-      -
-    * - soft body properties
-      -
-      -
-      -
+      - soft body properties
 
 warp/examples/sim
 ^^^^^^^^^^^^^^^^^
@@ -258,6 +249,24 @@ warp/examples/sim
       -
       -
 
+warp/examples/tile
+^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+    :class: gallery
+
+    * - .. image:: ./img/examples/tile_mlp.png
+            :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_mlp.py
+      - .. image:: ./img/examples/tile_nbody.png
+            :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_nbody.py
+      - .. image:: ./img/examples/tile_walker.png
+            :target: https://github.com/NVIDIA/warp/tree/main/warp/examples/tile/example_tile_walker.py
+      -
+    * - mlp
+      - nbody
+      - walker
+      -
+
 Omniverse
 ---------
 
@@ -303,7 +312,7 @@ projects at NVIDIA including the following publications:
    Visuomotor Control - Murthy, J. Krishna, Miles Macklin, Florian
    Golemo, Vikram Voleti, Linda Petrini, Martin Weiss, Breandan
    Considine et
-   al. `(2021) <https://gradsim.github.io>`__
+   al. `(2021) <https://gradsim.github.io>`__
 
 Support
 -------
@@ -313,6 +322,8 @@ Problems, questions, and feature requests can be opened on
 
 The Warp team also monitors the **#warp** forum on the public
 `Omniverse Discord <https://discord.com/invite/nvidiaomniverse>`_ server, come chat with us!
+
+For inquiries not suited for GitHub Issues or Discord, please email warp-python@nvidia.com.
 
 Versioning
 ----------

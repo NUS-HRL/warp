@@ -9,6 +9,7 @@ import math
 import unittest
 
 import warp as wp
+import warp.examples
 import warp.sim
 from warp.tests.unittest_utils import *
 
@@ -16,11 +17,7 @@ from warp.tests.unittest_utils import *
 def build_ant(num_envs):
     builder = wp.sim.ModelBuilder()
     for i in range(num_envs):
-        wp.sim.parse_mjcf(
-            os.path.join(os.path.dirname(__file__), "../../examples/assets/nv_ant.xml"),
-            builder,
-            up_axis="y",
-        )
+        wp.sim.parse_mjcf(os.path.join(warp.examples.get_asset_directory(), "nv_ant.xml"), builder, up_axis="y")
 
         coord_count = 15
         dof_count = 14
@@ -29,8 +26,10 @@ def build_ant(num_envs):
         dof_start = i * dof_count
 
         # base
-        builder.joint_q[coord_start : coord_start + 3] = [i * 2.0, 0.70, 0.0]
-        builder.joint_q[coord_start + 3 : coord_start + 7] = wp.quat_from_axis_angle((1.0, 0.0, 0.0), -math.pi * 0.5)
+        p = [i * 2.0, 0.70, 0.0]
+        q = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -math.pi * 0.5)
+        builder.joint_q[coord_start : coord_start + 3] = p
+        builder.joint_q[coord_start + 3 : coord_start + 7] = q
 
         # joints
         builder.joint_q[coord_start + 7 : coord_start + coord_count] = [0.0, 1.0, 0.0, -1.0, 0.0, -1.0, 0.0, 1.0]
@@ -48,9 +47,9 @@ def build_complex_joint_mechanism(chain_length):
     ax1 = wp.normalize(wp.vec3(4.0, -1.0, 2.0))
     ax2 = wp.normalize(wp.vec3(-3.0, 4.0, -1.0))
     # declare some transforms with nonzero translation and orientation
-    tf0 = wp.transform(wp.vec3(1.0, 2.0, 3.0), wp.quat_from_axis_angle((1.0, 0.0, 0.0), math.pi * 0.25))
-    tf1 = wp.transform(wp.vec3(4.0, 5.0, 6.0), wp.quat_from_axis_angle((0.0, 1.0, 0.0), math.pi * 0.5))
-    tf2 = wp.transform(wp.vec3(7.0, 8.0, 9.0), wp.quat_from_axis_angle((0.0, 0.0, 1.0), math.pi * 0.75))
+    tf0 = wp.transform(wp.vec3(1.0, 2.0, 3.0), wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), math.pi * 0.25))
+    tf1 = wp.transform(wp.vec3(4.0, 5.0, 6.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), math.pi * 0.5))
+    tf2 = wp.transform(wp.vec3(7.0, 8.0, 9.0), wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), math.pi * 0.75))
 
     parent = -1
     for _i in range(chain_length):

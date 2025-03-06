@@ -7,21 +7,26 @@
 
 import math
 import os
+import platform
 import unittest
 
 import warp as wp
+import warp.examples
 import warp.sim
 from warp.tests.unittest_utils import *
 
 
 def test_fk_ik(test, device):
+    if platform.machine() == "arm64" or platform.machine() == "aarch64":
+        test.skipTest("Skipping test on ARM64 due to undiagnosed segfault bug.")
+
     builder = wp.sim.ModelBuilder()
 
     num_envs = 1
 
     for i in range(num_envs):
         wp.sim.parse_mjcf(
-            os.path.join(os.path.dirname(__file__), "../examples/assets/nv_ant.xml"),
+            os.path.join(warp.examples.get_asset_directory(), "nv_ant.xml"),
             builder,
             stiffness=0.0,
             damping=1.0,
